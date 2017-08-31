@@ -1,6 +1,6 @@
 from math import *
 
-workdir='/Users/colin/workspace/scratch/spectralLES'  # not a problem arg
+workdir='./'  # not a problem arg
 
 pid = 'test_N64_K30_spectral'                       # problem ID
 odir = '%s/HIT_LES/%s/' % (workdir, pid)            # output folder

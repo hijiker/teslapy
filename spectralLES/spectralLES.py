@@ -159,24 +159,30 @@ class spectralLES(object):
         Cs = sqrt((pi**-2)*((3*Ck)**-1.5))  # == 0.098...
         # Cs = 0.2
         # so long as K, kmag, scales, etc. are integer, need to dimensionalize
-        D = self.L.min()/self.les_scale
-        self.smag_coef = 2.0*(Cs*D)**2
+        self.D = self.L.min() / self.les_scale
+        self.D_test = self.L.min() / self.test_scale
+        self.smag_coef = 2.0 * (Cs * self.D) ** 2
         self.nuTmax = 0.0
 
         # MPI Local subdomain data arrays (1D Decomposition)
         nnz, ny, nx = self.nnx
         nz, nny, nk = self.nnk
 
-        self.U = np.empty((3, nnz, ny, nx))     # solution vector
-        self.omga = np.empty_like(self.U)       # vorticity and vector memory
+        self.U = np.empty((3, nnz, ny, nx))  # solution vector
+        self.U_test = np.empty((3, nnz, ny, nx))  # solution vector on TEST scale
+        self.omga = np.empty_like(self.U)  # vorticity and vector memory
         self.A = np.empty((3, 3, nnz, ny, nx))  # Tensor memory
+        self.S_mod_S_ij_les = np.empty_like(self.A)
+        self.L_dyn = np.empty_like(self.A)  # Tensor memory
+        self.M_dyn = np.empty_like(self.A)  # Tensor memory
         # P = np.empty((nnz, ny, nx))
 
         self.U_hat = np.empty((3, nz, nny, nk), dtype=complex)
-        self.U_hat0= np.empty_like(self.U_hat)
-        self.U_hat1= np.empty_like(self.U_hat)
+        self.U_hat_test = np.empty_like(self.U_hat)
+        self.U_hat0 = np.empty_like(self.U_hat)
+        self.U_hat1 = np.empty_like(self.U_hat)
         self.S_hat = np.zeros_like(self.U_hat)  # source-term vector memory
-        self.dU = np.empty_like(self.U_hat)     # RHS accumulator
+        self.dU = np.empty_like(self.U_hat)  # RHS accumulator
 
     # Class Properities -------------------------------------------------------
 
@@ -251,6 +257,20 @@ class spectralLES(object):
             raise ValueError('did not understand filter type')
 
         return Ghat
+
+    def filter_3D_array(self, array, scale_k, result=None):
+
+        fft_array = rfft3(self.comm, array)
+        if scale_k == self.les_scale:
+            fft_filtered = fft_array*self.les_filter
+        elif scale_k == self.test_scale:
+            fft_filtered = fft_array * self.test_filter
+        else:
+            print('filter_3D_array: Unknown filter scale, filter with spectral filter')
+            fft_filtered = fft_array * self.filter_kernel(scale_k, 'spectral')
+        result = irfft3(self.comm, fft_filtered)
+
+        return result
 
     def Initialize_Taylor_Green_vortex(self):
         """
@@ -412,6 +432,84 @@ class spectralLES(object):
         #     print("---- SGS_ratio = %15.8f ----" % eps_ratio)
 
         return
+
+    def computeSource_DynamicSmagorinksy_SGS(self, **kwargs):
+        """Dynamic Smogarinsky model:
+            tau_ij = 2(Cs*D)**2|S|S_ij, where Cs defined dynamically as
+            Cs**2 = <(L_ij M_ij)>/<(M_ijM_ij)>
+        """
+        for i in range(3):
+            irfft3(self.comm, self.U_hat[i], self.U[i])             # Velocity field on LES scale in Physical space
+            self.U_hat_test[i] = self.U_hat[i] * self.test_filter   # Velocity field on TEST scale in Fourier space
+            irfft3(self.comm, self.U_hat_test[i], self.U_test[i])   # Velocity field on TEST scale in Physical space
+
+        # calculate S_ij on LES scale in self.A[i,j] working memory
+        for i in range(3):
+            for j in range(3):
+                self.A[j, i] = 0.5 * irfft3(self.comm,
+                                            1j * (self.K[2 - j] * self.U_hat[i] + self.K[2 - i] * self.U_hat[j]))
+        # calculate |S| = sqrt(2*S_ij*S_ij) on LES scale in self.omga working memory
+        self.omga[0] = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
+        # calculate |S|S_ij on LES scale
+        for i in range(3):
+            for j in range(3):
+                self.S_mod_S_ij_les[i, j] = self.A[i, j] * self.omga[0]
+
+        # calculate S_ij on TEST scale in self.A[i,j] working memory
+        for i in range(3):
+            for j in range(3):
+                self.A[j, i] = 0.5 * irfft3(self.comm,
+                                            1j * (self.K[2 - j] * self.U_hat_test[i] + self.K[2 - i] * self.U_hat_test[j]))
+        # calculate |S| = sqrt(2*S_ij*S_ij) on TEST scale in self.omga working memory
+        self.omga[0] = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
+
+
+        # calculate dynamic Cs
+        # (self.omga[1] and self.omga[2] is working memory)
+        # self.omga[0] is |S|_test
+        for i in range(3):
+            for j in range(3):
+                ## L_ij = ((Ui)_les*(Uj)_les)_test - (Ui)_test*(Uj)_test
+                self.omga[1] = self.U[i]*self.U[j]
+                self.omga[2] = self.filter_3D_array(self.omga[1], self.test_scale, self.omga[2])
+                self.L_dyn[i, j] = self.omga[2] - self.U_test[i]*self.U_test[j]
+
+                ## M_ij = -2(D_test^2*|S|_test*(S_ij)_test - D_les^2*(|S|_les*(S_ij)_les)_test )
+                self.omga[1] = self.omga[0] * self.A[i, j]
+                self.omga[2] = self.filter_3D_array(self.S_mod_S_ij_les[i, j], self.test_scale, self.omga[2])
+                self.M_dyn[i, j] = -2 * (self.D_test ** 2 * self.omga[1] - self.D ** 2 * self.omga[2])
+        trace = self.L_dyn[0, 0] + self.L_dyn[1, 1] + self.L_dyn[2, 2]
+        for i in range(3):
+            self.L_dyn[i, i] -= 1 / 3 * trace
+
+        L_M , M_M= 0, 0
+        for i in range(3):
+            for j in range(3):
+                L_M += self.L_dyn[i, j] * self.M_dyn[i, j]
+                M_M += self.M_dyn[i, j] * self.M_dyn[i, j]
+
+        flag = 1
+        if flag: #### C_s^2 = <L_ijM_ij>/<M_nkM_nk>
+            l_m = np.mean(L_M)
+            m_m = np.mean(M_M)
+            C_s_sqr = np.divide(l_m, m_m)
+            C_s = np.sqrt(C_s_sqr)
+            if self.comm.rank == 0:
+                print('Cs^2 = {} ,\tCs = {}'.format((C_s_sqr), C_s))
+        else: ##### C_s^2 = <L_ijM_ij/M_nkM_nk>
+            C_s_sqr = np.divide(L_M, M_M)
+            C_s = np.sqrt(np.mean(C_s_sqr))
+            if self.comm.rank == 0:
+                print('Cs^2 = {} ,\tCs = {}'.format((np.mean(C_s_sqr)), C_s))
+        ################################################################################################################
+
+        self.S_mod_S_ij_les *= 2 * (C_s * self.D) ** 2
+
+        self.S_hat[:] = 0.0
+        for i in range(3):
+            for j in range(3):
+                self.S_hat[i] += 1j * self.K[2 - j] * rfft3(self.comm, self.S_mod_S_ij_les[i, j])
+        self.dU += self.S_hat
 
     def computeAD_vorticity_formulation(self, **kwargs):
         """

@@ -105,7 +105,7 @@ def homogeneous_isotropic_turbulence(args):
     # - finish configuring solver with RHS terms
     solver.computeAD = solver.computeAD_vorticity_formulation
     Sources = [solver.computeSource_HIT_linear_forcing,
-               solver.computeSource_Smagorinksy_SGS]
+               solver.computeSource_DynamicSmagorinksy_SGS]
     kwargs = {}
 
     # -------------------------------------------------------------------------
