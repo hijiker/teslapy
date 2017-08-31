@@ -341,14 +341,18 @@ class mpiBaseAnalyzer(object):
         result = tcstats.histogram1(self.comm, self.Nx*norm,
                                     var, range, bins, w, wbar, m1)
         hist = result[0]
-        m = result[1:]
+        gmin, gmax, width = result[1:4]
+        m = result[4:]
 
         # write histogram from root task
         if self.comm.rank == 0:
-            fmt = ''.join(['{:.8e}\n']*len(m)).format
             fh = open('%s%s%s.hist' % (self.odir, self.prefix, fname), 'w')
-            fh.write(xlabel+'\n'+ylabel+'\n'+fmt(*m)+str(bins)+'\n')
-            hist.tofile(fh, sep='\n', format='%.8e')
+            fh.write('%s\t%s\n' % (xlabel, ylabel))
+            fmt = '%s\n' % '  '.join(['{:14.8e}']*len(m)).format
+            fh.write(fmt(*m))
+            fmt = '%d  %s\n' % '  '.join(['{:14.8e}']*3).format
+            fh.write(fmt(bins, width, gmin, gmax))
+            hist.tofile(fh, sep='\n', format='%14.8e')
             fh.close()
 
         return m
@@ -370,10 +374,11 @@ class mpiBaseAnalyzer(object):
 
         # write histogram from root task
         if self.comm.rank == 0:
-            fmt = ''.join(['{:.8e}\n']*len(m)).format
+            fmt = '%d  %s\n' % '  '.join(['{:14.8e}']*len(m)).format
             fh = open('%s%s%s.hist2d' % (self.odir, self.prefix, fname), 'w')
-            fh.write(xlabel+'\n'+ylabel+'\n'+fmt(*m)+str(bins)+'\n')
-            hist.tofile(fh, sep='\n', format='%.8e')
+            fh.write('%s\t%s\n' % (xlabel, ylabel))
+            fh.write(fmt(bins, *m))
+            hist.tofile(fh, sep='\n', format='%14.8e')
             fh.close()
 
         return m

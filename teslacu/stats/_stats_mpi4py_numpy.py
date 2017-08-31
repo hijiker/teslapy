@@ -21,41 +21,39 @@ def psum(data):
     return psum
 
 
-def central_moments(comm, N, data, w=None, wbar=None, m1=None):
+def central_moments(comm, N, data, w=None, wbar=None, m1=None, range=None):
     """
     Computes global min, max, and 1st to 6th biased central moments of
-    MPI-decomposed data. To get raw moments, simply pass in m1=0.
+    MPI-decomposed data. To get raw moments, simply pass in m1=0, this
+    function will still return the real 1st moment of the data.
     """
-    gmin = comm.allreduce(np.nanmin(data), op=MPI.MIN)
-    gmax = comm.allreduce(np.nanmax(data), op=MPI.MAX)
+    if range is None:
+        gmin = comm.allreduce(np.nanmin(data), op=MPI.MIN)
+        gmax = comm.allreduce(np.nanmax(data), op=MPI.MAX)
+    else:
+        (gmin, gmax) = range
 
     if w is None:   # unweighted moments
-        # 1st raw moment
-        if m1 is None:
-            m1 = comm.allreduce(psum(data), op=MPI.SUM)/N
-        # 2nd-6th centered moments
-        cdata = data-m1
-        c2 = comm.allreduce(psum(np.power(cdata, 2)), op=MPI.SUM)/N
-        c3 = comm.allreduce(psum(np.power(cdata, 3)), op=MPI.SUM)/N
-        c4 = comm.allreduce(psum(np.power(cdata, 4)), op=MPI.SUM)/N
-        c5 = comm.allreduce(psum(np.power(cdata, 5)), op=MPI.SUM)/N
-        c6 = comm.allreduce(psum(np.power(cdata, 6)), op=MPI.SUM)/N
-
+        w = 1.0
     else:           # weighted moments
         if wbar is None:
             wbar = comm.allreduce(psum(w), op=MPI.SUM)/N
-
         N = N*wbar
-        # 1st raw moment
-        if m1 is None:
-            m1 = comm.allreduce(psum(w*data), op=MPI.SUM)/N
-        # 2nd-6th centered moments
-        cdata = data-m1
-        c2 = comm.allreduce(psum(w*np.power(cdata, 2)), op=MPI.SUM)/N
-        c3 = comm.allreduce(psum(w*np.power(cdata, 3)), op=MPI.SUM)/N
-        c4 = comm.allreduce(psum(w*np.power(cdata, 4)), op=MPI.SUM)/N
-        c5 = comm.allreduce(psum(w*np.power(cdata, 5)), op=MPI.SUM)/N
-        c6 = comm.allreduce(psum(w*np.power(cdata, 6)), op=MPI.SUM)/N
+
+    # 1st raw moment
+    if m1 is None:
+        m1 = comm.allreduce(psum(w*data), op=MPI.SUM)/N
+
+    # 2nd-6th centered moments
+    c2 = comm.allreduce(psum(w*np.power(data-m1, 2)), op=MPI.SUM)/N
+    c3 = comm.allreduce(psum(w*np.power(data-m1, 3)), op=MPI.SUM)/N
+    c4 = comm.allreduce(psum(w*np.power(data-m1, 4)), op=MPI.SUM)/N
+    c5 = comm.allreduce(psum(w*np.power(data-m1, 5)), op=MPI.SUM)/N
+    c6 = comm.allreduce(psum(w*np.power(data-m1, 6)), op=MPI.SUM)/N
+
+    # check for m1 exactly 0.0, indicating request for raw moments
+    if m1 == 0.0:
+        m1 = comm.allreduce(psum(w*data), op=MPI.SUM)/N
 
     return m1, c2, c3, c4, c5, c6, gmin, gmax
 
@@ -74,32 +72,16 @@ def histogram1(comm, N, data, range=None, bins=50, w=None, wbar=None, m1=None):
     #     MPI.Finalize()
     #     sys.exit(999)
 
-    if w is None:
-        if m1 is None:
-            m1 = comm.allreduce(psum(data), op=MPI.SUM)/N
-        m2 = comm.allreduce(psum(np.power(data, 2)), op=MPI.SUM)/N
-    else:
-        if wbar is None:
-            wbar = comm.allreduce(psum(w), op=MPI.SUM)/N
-        N = N*wbar
-        if m1 is None:
-            m1 = comm.allreduce(psum(w*data), op=MPI.SUM)/N
-        m2 = comm.allreduce(psum(w*np.power(data, 2)), op=MPI.SUM)/N
-
-    if range is None:
-        gmin = comm.allreduce(np.nanmin(data), op=MPI.MIN)
-        gmax = comm.allreduce(np.nanmax(data), op=MPI.MAX)
-    else:
-        (gmin, gmax) = range
-
+    m1, c2, c3, c4, c5, c6, gmin, gmax = central_moments(
+                                            comm, N, data, w, wbar, m1, range)
     width = (gmax-gmin)/bins
 
-    temp = np.histogram(data, bins=bins, range=(gmin, gmax), weights=w)[0]
-    hist = temp.astype(data.dtype, order='C')
+    hist = np.histogram(data, bins=bins, range=(gmin, gmax), weights=w)[0]
+    hist[:] = hist.astype(data.dtype, order='C')
     comm.Allreduce(MPI.IN_PLACE, hist, op=MPI.SUM)
     hist *= 1.0/hist.sum()  # makes this a probability mass function
 
-    return hist, m1, m2, gmin, gmax, width
+    return hist, gmin, gmax, width, m1, c2, c3, c4, c5, c6
 
 
 def histogram2(comm, var1, var2, xrange=None, yrange=None, bins=50, w=None):
