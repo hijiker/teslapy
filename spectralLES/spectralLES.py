@@ -157,7 +157,15 @@ class spectralLES(object):
 
         Ck = 1.6
         Cs = sqrt((pi**-2)*((3*Ck)**-1.5))  # == 0.098...
-        self.C = [0.23500012323837638, -0.11000005245050457, 0.04499961517244655]
+        # self.C = [0.146, -0.058, 0.012] # min dist from CU 50^3
+        # self.C = [0.173, -0.083, 0.015] # mindist from CU 100^3
+        # self.C = [0.107, -0.193, -0.143]  # joint pdf from CU wrong
+        # self.C = [0.16, -0.09, 0.09]  # min dist from JHU
+        # self.C = [0.056, -0.194, -0.035]    # joint pdf from JHU
+        # self.C = [0.0078, -0.08985, 0.06475] #joint pdf from JHU eps = 210
+        # self.C = [0.2, -0.1, 0.1]
+        self.C = [0.01, -0.2, 0.1]
+        self.C[0] = -2*self.C[0]**2
         # Cs = 0.2
         # so long as K, kmag, scales, etc. are integer, need to dimensionalize
         self.D = self.L.min() / self.les_scale
@@ -170,8 +178,9 @@ class spectralLES(object):
         nz, nny, nk = self.nnk
 
         self.U = np.empty((3, nnz, ny, nx))  # solution vector
-        self.U_test = np.empty((3, nnz, ny, nx))  # solution vector on TEST scale
+        self.U_test = np.empty_like(self.U)  # solution vector on TEST scale
         self.omga = np.empty_like(self.U)  # vorticity and vector memory
+
         self.A = np.empty((3, 3, nnz, ny, nx))  # Tensor memory
         self.R = np.empty_like(self.A)  # Tensor memory
         self.S_mod_S_ij_les = np.empty_like(self.A)
@@ -180,7 +189,7 @@ class spectralLES(object):
         # P = np.empty((nnz, ny, nx))
 
         self.U_hat = np.empty((3, nz, nny, nk), dtype=complex)
-        self.U_hat_test = np.empty_like(self.U_hat)
+
         self.U_hat0 = np.empty_like(self.U_hat)
         self.U_hat1 = np.empty_like(self.U_hat)
         self.S_hat = np.zeros_like(self.U_hat)  # source-term vector memory
@@ -441,10 +450,18 @@ class spectralLES(object):
                         + C[1]*D^2*(S_ikR_kj - R_ikS_kj) +
                         + C[2]*Delta^2*(S_ikS_kj - 1/3{S_ikS_ki}delta_ij))
         """
+        # links to already allocated memory
+        S_ij = self.A
+        S_S_invar = self.omga[0]
+        tensor = self.omga[1]
+        tensor1 = self.S_mod_S_ij_les
+        tensor2 = self.L_dyn
+        tensor3 = self.M_dyn
+        ####################
         # calculate S_ij on LES scale in self.A[i,j] working memory
         for i in range(3):
             for j in range(3):
-                self.A[j, i] = 0.5 * irfft3(self.comm,
+                S_ij[j, i] = 0.5 * irfft3(self.comm,
                                             1j * (self.K[2 - j] * self.U_hat[i] + self.K[2 - i] * self.U_hat[j]))
         # calculate |S| = sqrt(2*S_ij*S_ij) on LES scale in self.omga working memory
         S_S_invar = np.sum(np.square(self.A), axis=(0, 1))
@@ -459,7 +476,7 @@ class spectralLES(object):
         # calculate |S|S_ij on LES scale
         for i in range(3):
             for j in range(3):
-                self.S_mod_S_ij_les[i, j] = self.A[i, j] * np.sqrt(2.0 * S_S_invar)
+                tensor1[i, j] = self.A[i, j] * np.sqrt(2.0 * S_S_invar)
 
         # Tensor 2
         # Calculate (S_ikR_kj - R_ikS_kj) in L_dyn[i, j] working memory
@@ -483,10 +500,9 @@ class spectralLES(object):
         self.S_hat[:] = 0.0
         for i in range(3):
             for j in range(3):
-                tensor = -self.D**2*(-2*self.C[0]**2 * self.S_mod_S_ij_les[j, i] +
-                                                                  self.C[1] * tensor2[j, i] +
-                                                                  self.C[2] * tensor3[j, i])
+                tensor = -self.D**2*(self.C[0] * tensor1[j, i] + self.C[1] * tensor2[j, i] + self.C[2] * tensor3[j, i])
                 self.S_hat[i] += 1j*self.K[2-j]*rfft3(self.comm, tensor)
+
         self.dU += self.S_hat
 
 
@@ -495,30 +511,35 @@ class spectralLES(object):
             tau_ij = 2(Cs*D)**2|S|S_ij, where Cs defined dynamically as
             Cs**2 = <(L_ij M_ij)>/<(M_ijM_ij)>
         """
+        # links to the memory
+        U_hat_test = self.U_hat0
+        S_ij = self.A
+        S_mod = self.omga[0]
+        ####################
         for i in range(3):
             irfft3(self.comm, self.U_hat[i], self.U[i])             # Velocity field on LES scale in Physical space
-            self.U_hat_test[i] = self.U_hat[i] * self.test_filter   # Velocity field on TEST scale in Fourier space
-            irfft3(self.comm, self.U_hat_test[i], self.U_test[i])   # Velocity field on TEST scale in Physical space
+            U_hat_test[i] = self.U_hat[i] * self.test_filter   # Velocity field on TEST scale in Fourier space
+            irfft3(self.comm, U_hat_test[i], self.U_test[i])   # Velocity field on TEST scale in Physical space
 
-        # calculate S_ij on LES scale in self.A[i,j] working memory
+        # calculate S_ij on LES scale
         for i in range(3):
             for j in range(3):
-                self.A[j, i] = 0.5 * irfft3(self.comm,
+                S_ij[j, i] = 0.5 * irfft3(self.comm,
                                             1j * (self.K[2 - j] * self.U_hat[i] + self.K[2 - i] * self.U_hat[j]))
-        # calculate |S| = sqrt(2*S_ij*S_ij) on LES scale in self.omga working memory
-        self.omga[0] = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
+        # calculate |S| = sqrt(2*S_ij*S_ij) on LES scale
+        S_mod = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
         # calculate |S|S_ij on LES scale
         for i in range(3):
             for j in range(3):
-                self.S_mod_S_ij_les[i, j] = self.A[i, j] * self.omga[0]
+                self.S_mod_S_ij_les[i, j] = S_mod * S_ij[i, j]
 
         # calculate S_ij on TEST scale in self.A[i,j] working memory
         for i in range(3):
             for j in range(3):
-                self.A[j, i] = 0.5 * irfft3(self.comm,
+                S_ij[j, i] = 0.5 * irfft3(self.comm,
                                             1j * (self.K[2 - j] * self.U_hat_test[i] + self.K[2 - i] * self.U_hat_test[j]))
         # calculate |S| = sqrt(2*S_ij*S_ij) on TEST scale in self.omga working memory
-        self.omga[0] = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
+        S_mod = np.sqrt(2.0 * np.sum(np.square(self.A), axis=(0, 1)))
 
 
         # calculate dynamic Cs
@@ -620,9 +641,7 @@ class spectralLES(object):
 
     def RK4_integrate(self, dt, *Sources, **kwargs):
         """
-        Nth order Runge-Kutta time integrator for spectralLES
-        Olga/Peter: I didn't really pay attention to the paper, is this
-                    actually 4th order, or is it only 3rd order?
+        Classical 4th order Runge-Kutta time integrator for spectralLES
 
         Arguments:
         ----------
